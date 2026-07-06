@@ -12,7 +12,6 @@ import requests
 from telegram import ReplyKeyboardMarkup, Update
 from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
 
-# ==================== НАСТРОЙКИ ====================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8518822069:AAF6rqBc8pg47jf9o5enzMup8wxAOQY68Jw")
 KEITARO_URL = os.getenv("KEITARO_URL", "https://lgmaxverd.sbs").strip().rstrip("/")
 KEITARO_API_KEY = os.getenv("KEITARO_API_KEY", "cd02621ae03b3d9327efc05798cdd75b").strip()
@@ -28,7 +27,6 @@ PEOPLE = {
     "49": "Sasha",
 }
 
-# Правильные названия метрик для этой версии Keitaro (проверено через API)
 BASE_METRICS = ["clicks", "campaign_unique_clicks", "conversions", "cost", "revenue", "profit"]
 STATUS_METRICS = {
     "confirmed": "sales",
@@ -37,7 +35,6 @@ STATUS_METRICS = {
 UNIQUE_CLICKS_KEY = "campaign_unique_clicks"
 
 PROFILE_STORE_PATH = os.path.join(os.path.dirname(__file__), "user_profiles.json")
-# =====================================================
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -65,7 +62,6 @@ PERIOD_RANGES = {
 }
 
 
-# ---------------------- Хранилище профилей ----------------------
 def load_profiles() -> dict:
     if os.path.exists(PROFILE_STORE_PATH):
         with open(PROFILE_STORE_PATH, "r", encoding="utf-8") as f:
@@ -78,7 +74,6 @@ def save_profiles(profiles: dict) -> None:
         json.dump(profiles, f, ensure_ascii=False, indent=2)
 
 
-# ---------------------- Клавиатуры ----------------------
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL]]
     names = list(PEOPLE.values())
@@ -103,7 +98,6 @@ def period_keyboard() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
-# ---------------------- Keitaro API ----------------------
 def build_payload(sub_id_value, date_from: date, date_to: date) -> dict:
     filters = []
     if sub_id_value is not None:
@@ -147,7 +141,6 @@ def fetch_stats(sub_id_value, date_from: date, date_to: date) -> dict:
     return data.get("summary") or data.get("totals") or {}
 
 
-# ---------------------- Форматирование ----------------------
 def format_stats(title: str, stats: dict, date_from: date, date_to: date) -> str:
     def g(key, default=0):
         return stats.get(key, default)
@@ -183,7 +176,6 @@ def safe_fetch_and_format(title: str, sub_id_value, date_from: date, date_to: da
         return "Не удалось получить статистику. Попробуй ещё раз чуть позже."
 
 
-# ---------------------- Хендлеры ----------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending", None)
     await update.message.reply_text(
@@ -197,7 +189,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_id = str(update.effective_user.id)
     pending = context.user_data.get("pending")
 
-    # --- Если сейчас ждём выбор периода ---
     if pending and text in PERIOD_RANGES:
         date_from, date_to = PERIOD_RANGES[text]()
         message = safe_fetch_and_format(
@@ -237,7 +228,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
         return
 
-    # Выбор человека из списка
     name_to_sub_id = {name: sub_id for sub_id, name in PEOPLE.items()}
     if text in name_to_sub_id:
         sub_id_value = name_to_sub_id[text]

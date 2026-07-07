@@ -1,16 +1,25 @@
 """
 Telegram-бот со статистикой Keitaro: меню с кнопками, статистика по каждому
-человеку (по параметру sub_id_20), общий итог по команде и выбор периода.
+человеку (по параметру sub_id_20), общий итог по команде, выбор периода
+и календарь для выбора произвольной даты.
 """
 
 import os
 import json
 import logging
+import calendar
 from datetime import date, timedelta
 
 import requests
-from telegram import ReplyKeyboardMarkup, Update
-from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, Update
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    MessageHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    filters,
+)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8518822069:AAF6rqBc8pg47jf9o5enzMup8wxAOQY68Jw")
 KEITARO_URL = os.getenv("KEITARO_URL", "https://lgmaxverd.sbs").strip().rstrip("/")
@@ -44,6 +53,8 @@ logger = logging.getLogger(__name__)
 MENU_MY_STATS = "📊 Моя стата"
 MENU_TEAM = "👥 Команда"
 MENU_TOTAL = "📋 Итого"
+MENU_CALENDAR = "📅 Выбрать период"
+CALENDAR_PICK = "📅 Своя дата"
 BACK = "⬅️ Назад"
 
 PERIOD_TODAY = "Сегодня"
@@ -61,6 +72,11 @@ PERIOD_RANGES = {
     PERIOD_30D: lambda: (date.today() - timedelta(days=29), date.today()),
 }
 
+MONTH_NAMES_RU = [
+    "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+]
+
 
 def load_profiles() -> dict:
     if os.path.exists(PROFILE_STORE_PATH):
@@ -75,7 +91,7 @@ def save_profiles(profiles: dict) -> None:
 
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL]]
+    rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL], [MENU_CALENDAR]]
     names = list(PEOPLE.values())
     for i in range(0, len(names), 2):
         rows.append(names[i:i + 2])
@@ -93,9 +109,50 @@ def period_keyboard() -> ReplyKeyboardMarkup:
     rows = [
         [PERIOD_TODAY, PERIOD_YESTERDAY],
         [PERIOD_7D, PERIOD_30D],
+        [CALENDAR_PICK],
         [BACK],
     ]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def build_calendar_markup(year: int, month: int) -> InlineKeyboardMarkup:
+    keyboard = []
+
+    keyboard.append([
+        InlineKeyboardButton(
+            f"{MONTH_NAMES_RU[month]} {year}", callback_data="cal:ignore"
+        )
+    ])
+
+    week_days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    keyboard.append([InlineKeyboardButton(d, callback_data="cal:ignore") for d in week_days])
+
+    month_calendar = calendar.monthcalendar(year, month)
+    today = date.today()
+
+    for week in month_calendar:
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(InlineKeyboardButton(" ", callback_data="cal:ignore"))
+            else:
+                label = f"[{day}]" if date(year, month, day) == today else str(day)
+                row.append(InlineKeyboardButton(
+                    label, callback_data=f"cal:pick:{year}-{month:02d}-{day:02d}"
+                ))
+        keyboard.append(row)
+
+    prev_month = month - 1 or 12
+    prev_year = year - 1 if month == 1 else year
+    next_month = month + 1 if month < 12 else 1
+    next_year = year + 1 if month == 12 else year
+
+    keyboard.append([
+        InlineKeyboardButton("« Пред.", callback_data=f"cal:nav:{prev_year}-{prev_month:02d}"),
+        InlineKeyboardButton("След. »", callback_data=f"cal:nav:{next_year}-{next_month:02d}"),
+    ])
+
+    return InlineKeyboardMarkup(keyboard)
 
 
 def build_payload(sub_id_value, date_from: date, date_to: date) -> dict:
@@ -198,6 +255,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data.pop("pending", None)
         return
 
+    if pending and text == CALENDAR_PICK:
+        today = date.today()
+        await update.message.reply_text(
+            f"Выбери дату для «{pending['title']}»:",
+            reply_markup=build_calendar_markup(today.year, today.month),
+        )
+        return
+
     if text == BACK:
         context.user_data.pop("pending", None)
         await update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard())
@@ -210,6 +275,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if text == MENU_TOTAL:
         context.user_data["pending"] = {"sub_id": None, "title": "Итого (вся команда)"}
         await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
+        return
+
+    if text == MENU_CALENDAR:
+        context.user_data.pop("pending", None)
+        today = date.today()
+        await update.message.reply_text(
+            "Выбери дату — покажу статистику всей команды за этот день:",
+            reply_markup=build_calendar_markup(today.year, today.month),
+        )
         return
 
     if text == MENU_MY_STATS:
@@ -241,9 +315,42 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await update.message.reply_text("Не понял команду. Выбери пункт меню:", reply_markup=main_menu_keyboard())
 
 
+async def handle_calendar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    data = query.data
+
+    if data == "cal:ignore":
+        await query.answer()
+        return
+
+    if data.startswith("cal:nav:"):
+        year_month = data.split(":")[2]
+        year, month = map(int, year_month.split("-"))
+        await query.answer()
+        await query.edit_message_reply_markup(reply_markup=build_calendar_markup(year, month))
+        return
+
+    if data.startswith("cal:pick:"):
+        date_str = data.split(":", 2)[2]
+        picked_date = date.fromisoformat(date_str)
+        await query.answer("Считаю статистику…")
+        pending = context.user_data.get("pending")
+        if pending:
+            title, sub_id_value = pending["title"], pending["sub_id"]
+        else:
+            title, sub_id_value = "Итого (вся команда)", None
+        message = safe_fetch_and_format(title, sub_id_value, picked_date, picked_date)
+        await query.message.reply_html(message, reply_markup=main_menu_keyboard())
+        context.user_data.pop("pending", None)
+        return
+
+    await query.answer()
+
+
 def main() -> None:
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CallbackQueryHandler(handle_calendar_callback, pattern=r"^cal:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Bot started. Polling for updates...")
     application.run_polling(allowed_updates=Update.ALL_TYPES)

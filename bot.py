@@ -1,7 +1,7 @@
 """
 Telegram-бот со статистикой Keitaro: меню с кнопками, статистика по каждому
-человеку (по параметру sub_id_20), общий итог по команде, выбор периода
-и календарь для выбора произвольной даты.
+человеку (по параметру sub_id_20), общий итог по команде, выбор периода,
+календарь для выбора произвольной даты и разграничение прав доступа.
 """
 
 import os
@@ -36,6 +36,17 @@ PEOPLE = {
     "47": "Maksim",
     "48": "Kostya",
     "49": "Sasha",
+}
+
+# ---- Права доступа ----
+ADMIN_USER_IDS = {
+    # "123456789",  # bestik430
+}
+EMPLOYEE_SUB_ID_MAP = {
+    # "111111111": "47",  # Maksim
+    # "222222222": "49",  # Sasha
+    # "333333333": "48",  # Kostya
+    # "444444444": "46",  # Alex
 }
 
 BASE_METRICS = ["clicks", "campaign_unique_clicks", "conversions", "cost", "revenue", "profit"]
@@ -106,8 +117,21 @@ def save_profiles(profiles: dict) -> None:
         json.dump(profiles, f, ensure_ascii=False, indent=2)
 
 
+def get_role(user_id: str):
+    if user_id in ADMIN_USER_IDS:
+        return "admin"
+    if user_id in EMPLOYEE_SUB_ID_MAP:
+        return "employee"
+    return None
+
+
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
     rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL], [MENU_EXPENSE, MENU_PROFIT]]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def employee_menu_keyboard() -> ReplyKeyboardMarkup:
+    rows = [[MENU_MY_STATS]]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -416,6 +440,25 @@ def safe_fetch_profit_and_format(title: str, sub_id_value, date_from: date, date
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending", None)
+    user_id = str(update.effective_user.id)
+    role = get_role(user_id)
+
+    if role is None:
+        await update.message.reply_text(
+            f"У тебя пока нет доступа к этому боту.\n\n"
+            f"Твой Telegram ID: <code>{user_id}</code>\n"
+            f"Перешли этот ID администратору, чтобы он выдал тебе доступ.",
+            parse_mode="HTML",
+        )
+        return
+
+    if role == "employee":
+        await update.message.reply_text(
+            "Привет! Выбери, что показать:",
+            reply_markup=employee_menu_keyboard(),
+        )
+        return
+
     await update.message.reply_text(
         "Привет! Выбери, что показать:",
         reply_markup=main_menu_keyboard(),
@@ -425,6 +468,56 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     text = update.message.text
     user_id = str(update.effective_user.id)
+    role = get_role(user_id)
+
+    if role is None:
+        await update.message.reply_text(
+            f"У тебя пока нет доступа к этому боту.\n\n"
+            f"Твой Telegram ID: <code>{user_id}</code>\n"
+            f"Перешли этот ID администратору, чтобы он выдал тебе доступ.",
+            parse_mode="HTML",
+        )
+        return
+
+    menu_kb = main_menu_keyboard() if role == "admin" else employee_menu_keyboard()
+
+    if role == "employee":
+        pending = context.user_data.get("pending")
+        if pending and text in PERIOD_RANGES:
+            date_from, date_to = PERIOD_RANGES[text]()
+            message = safe_fetch_and_format(
+                pending["title"], pending["sub_id"], date_from, date_to
+            )
+            await update.message.reply_html(message, reply_markup=menu_kb)
+            context.user_data.pop("pending", None)
+            return
+
+        if pending and text == CALENDAR_PICK:
+            today = date.today()
+            await update.message.reply_text(
+                f"Выбери дату для «{pending['title']}»:",
+                reply_markup=build_calendar_markup(today.year, today.month),
+            )
+            return
+
+        if text == BACK:
+            context.user_data.pop("pending", None)
+            await update.message.reply_text("Главное меню:", reply_markup=menu_kb)
+            return
+
+        if text == MENU_MY_STATS:
+            sub_id_value = EMPLOYEE_SUB_ID_MAP[user_id]
+            context.user_data["pending"] = {
+                "sub_id": sub_id_value,
+                "title": f"Моя стата ({PEOPLE.get(sub_id_value, sub_id_value)})",
+                "mode": "revenue",
+            }
+            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
+            return
+
+        await update.message.reply_text("Выбери пункт меню:", reply_markup=menu_kb)
+        return
+
     pending = context.user_data.get("pending")
 
     if pending and text in PERIOD_RANGES:
@@ -561,6 +654,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def handle_calendar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     data = query.data
+    user_id = str(query.from_user.id)
+    role = get_role(user_id)
+    if role is None:
+        await query.answer()
+        return
+    menu_kb = main_menu_keyboard() if role == "admin" else employee_menu_keyboard()
 
     if data == "cal:ignore":
         await query.answer()
@@ -588,7 +687,7 @@ async def handle_calendar_callback(update: Update, context: ContextTypes.DEFAULT
             message = safe_fetch_profit_and_format(title, sub_id_value, picked_date, picked_date)
         else:
             message = safe_fetch_and_format(title, sub_id_value, picked_date, picked_date)
-        await query.message.reply_html(message, reply_markup=main_menu_keyboard())
+        await query.message.reply_html(message, reply_markup=menu_kb)
         context.user_data.pop("pending", None)
         return
 

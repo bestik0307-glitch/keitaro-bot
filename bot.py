@@ -47,7 +47,6 @@ UNIQUE_CLICKS_KEY = "campaign_unique_clicks"
 
 PROFILE_STORE_PATH = os.path.join(os.path.dirname(__file__), "user_profiles.json")
 
-# ---- Таблица с расходами (Google Sheets) ----
 GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv(
     "GOOGLE_SHEETS_CREDENTIALS_PATH", "/opt/keitaro_bot/gsheet_credentials.json"
 )
@@ -66,8 +65,10 @@ logger = logging.getLogger(__name__)
 MENU_MY_STATS = "📊 Моя стата"
 MENU_TEAM = "👥 Команда"
 MENU_TOTAL = "📋 Итого"
+MENU_EXPENSE = "💸 Расход"
 MENU_CALENDAR = "📅 Выбрать период"
 CALENDAR_PICK = "📅 Своя дата"
+EXPENSE_ALL = "📋 Итого (расход)"
 BACK = "⬅️ Назад"
 
 PERIOD_TODAY = "Сегодня"
@@ -104,7 +105,15 @@ def save_profiles(profiles: dict) -> None:
 
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL]]
+    rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL], [MENU_EXPENSE]]
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def expense_target_keyboard() -> ReplyKeyboardMarkup:
+    names = list(PEOPLE.values())
+    rows = [names[i:i + 2] for i in range(0, len(names), 2)]
+    rows.append([EXPENSE_ALL])
+    rows.append([BACK])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -333,6 +342,28 @@ def safe_fetch_and_format(title: str, sub_id_value, date_from: date, date_to: da
     return format_stats(title, stats, date_from, date_to, expense)
 
 
+def format_expense_only(title: str, expense: float, date_from: date, date_to: date) -> str:
+    if date_from == date_to:
+        period = date_from.strftime("%d.%m.%Y")
+    else:
+        period = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
+
+    return (
+        f"📌 <b>{title}</b>\n"
+        f"🗓 Период: {period}\n\n"
+        f"💸 Расход: <b>${expense:.2f}</b>"
+    )
+
+
+def safe_fetch_expense_and_format(title: str, sub_id_value, date_from: date, date_to: date) -> str:
+    try:
+        expense = fetch_expense(sub_id_value, date_from, date_to)
+    except Exception:
+        logger.exception("Unexpected error while fetching expense from Google Sheets")
+        return "Не удалось получить расход. Попробуй ещё раз чуть позже."
+    return format_expense_only(title, expense, date_from, date_to)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending", None)
     await update.message.reply_text(
@@ -348,9 +379,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if pending and text in PERIOD_RANGES:
         date_from, date_to = PERIOD_RANGES[text]()
-        message = safe_fetch_and_format(
-            pending["title"], pending["sub_id"], date_from, date_to
-        )
+        if pending.get("mode") == "expense":
+            message = safe_fetch_expense_and_format(
+                pending["title"], pending["sub_id"], date_from, date_to
+            )
+        else:
+            message = safe_fetch_and_format(
+                pending["title"], pending["sub_id"], date_from, date_to
+            )
         await update.message.reply_html(message, reply_markup=main_menu_keyboard())
         context.user_data.pop("pending", None)
         return
@@ -366,6 +402,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if text == BACK:
         context.user_data.pop("pending", None)
         await update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard())
+        return
+
+    if context.user_data.get("awaiting_expense_target"):
+        context.user_data.pop("awaiting_expense_target", None)
+        name_to_sub_id_exp = {name: sub_id for sub_id, name in PEOPLE.items()}
+        if text == EXPENSE_ALL:
+            context.user_data["pending"] = {
+                "sub_id": None, "title": "Расход (вся команда)", "mode": "expense"
+            }
+            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
+            return
+        elif text in name_to_sub_id_exp:
+            context.user_data["pending"] = {
+                "sub_id": name_to_sub_id_exp[text], "title": f"Расход ({text})", "mode": "expense"
+            }
+            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
+            return
+        else:
+            await update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard())
+            return
+
+    if text == MENU_EXPENSE:
+        context.user_data["awaiting_expense_target"] = True
+        await update.message.reply_text(
+            "Чей расход показать?", reply_markup=expense_target_keyboard()
+        )
         return
 
     if text == MENU_TEAM:
@@ -436,10 +498,13 @@ async def handle_calendar_callback(update: Update, context: ContextTypes.DEFAULT
         await query.answer("Считаю статистику…")
         pending = context.user_data.get("pending")
         if pending:
-            title, sub_id_value = pending["title"], pending["sub_id"]
+            title, sub_id_value, mode = pending["title"], pending["sub_id"], pending.get("mode")
         else:
-            title, sub_id_value = "Итого (вся команда)", None
-        message = safe_fetch_and_format(title, sub_id_value, picked_date, picked_date)
+            title, sub_id_value, mode = "Итого (вся команда)", None, "revenue"
+        if mode == "expense":
+            message = safe_fetch_expense_and_format(title, sub_id_value, picked_date, picked_date)
+        else:
+            message = safe_fetch_and_format(title, sub_id_value, picked_date, picked_date)
         await query.message.reply_html(message, reply_markup=main_menu_keyboard())
         context.user_data.pop("pending", None)
         return

@@ -213,16 +213,24 @@ def fetch_expense(sub_id_value, date_from: date, date_to: date) -> float:
 
         rows = result.get("values", [])
         if not rows:
+            logger.warning("Вкладка %s: данные не получены (rows пустой)", tab_name)
             continue
 
         header = rows[0]
+        logger.info("Вкладка %s: получено строк=%d, заголовок(первые 10)=%s", tab_name, len(rows), header[:10])
         date_col = {}
+        sheets_epoch = date(1899, 12, 30)
         for idx, cell in enumerate(header):
             if isinstance(cell, str) and cell.count(".") == 2:
                 try:
                     dd, mm, yyyy = cell.split(".")
                     date_col[date(int(yyyy), int(mm), int(dd))] = idx
                 except ValueError:
+                    continue
+            elif isinstance(cell, (int, float)):
+                try:
+                    date_col[sheets_epoch + timedelta(days=int(cell))] = idx
+                except (ValueError, OverflowError):
                     continue
 
         if sub_id_value is None:

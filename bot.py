@@ -11,6 +11,8 @@ import calendar
 from datetime import date, timedelta
 
 import requests
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
 from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, Update
 from telegram.ext import (
     Application,
@@ -44,6 +46,17 @@ STATUS_METRICS = {
 UNIQUE_CLICKS_KEY = "campaign_unique_clicks"
 
 PROFILE_STORE_PATH = os.path.join(os.path.dirname(__file__), "user_profiles.json")
+
+# ---- Таблица с расходами (Google Sheets) ----
+GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv(
+    "GOOGLE_SHEETS_CREDENTIALS_PATH", "/opt/keitaro_bot/gsheet_credentials.json"
+)
+EXPENSE_SPREADSHEET_ID = os.getenv(
+    "EXPENSE_SPREADSHEET_ID", "1_HtfLM1i_oh-utbFRwAHUFNL_mPho6-Hpcjt-sZ5J8Y"
+)
+EXPENSE_ROW_ORDER = list(PEOPLE.keys())
+
+_sheets_service = None
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -152,6 +165,87 @@ def build_calendar_markup(year: int, month: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(keyboard)
 
 
+def get_sheets_service():
+    global _sheets_service
+    if _sheets_service is None:
+        creds = service_account.Credentials.from_service_account_file(
+            GOOGLE_SHEETS_CREDENTIALS_PATH,
+            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+        )
+        _sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    return _sheets_service
+
+
+def fetch_expense(sub_id_value, date_from: date, date_to: date) -> float:
+    total = 0.0
+    try:
+        service = get_sheets_service()
+    except Exception:
+        logger.exception("Не удалось инициализировать Google Sheets API")
+        return 0.0
+
+    months = set()
+    d = date_from
+    while d <= date_to:
+        months.add((d.year, d.month))
+        d += timedelta(days=1)
+
+    for year, month in months:
+        tab_name = f"{MONTH_NAMES_RU[month]} {year}"
+        try:
+            result = service.spreadsheets().values().get(
+                spreadsheetId=EXPENSE_SPREADSHEET_ID,
+                range=f"'{tab_name}'!A1:AZ8",
+                valueRenderOption="UNFORMATTED_VALUE",
+            ).execute()
+        except Exception:
+            logger.exception("Не удалось прочитать вкладку %s в таблице расходов", tab_name)
+            continue
+
+        rows = result.get("values", [])
+        if not rows:
+            continue
+
+        header = rows[0]
+        date_col = {}
+        for idx, cell in enumerate(header):
+            if isinstance(cell, str) and cell.count(".") == 2:
+                try:
+                    dd, mm, yyyy = cell.split(".")
+                    date_col[date(int(yyyy), int(mm), int(dd))] = idx
+                except ValueError:
+                    continue
+
+        if sub_id_value is None:
+            target_rows = list(range(1, 1 + len(EXPENSE_ROW_ORDER)))
+        else:
+            try:
+                pos = EXPENSE_ROW_ORDER.index(sub_id_value)
+                target_rows = [1 + pos]
+            except ValueError:
+                target_rows = []
+
+        d2 = max(date_from, date(year, month, 1))
+        last_day = calendar.monthrange(year, month)[1]
+        month_end = min(date_to, date(year, month, last_day))
+        while d2 <= month_end:
+            col = date_col.get(d2)
+            if col is not None:
+                for r_idx in target_rows:
+                    if r_idx < len(rows) and col < len(rows[r_idx]):
+                        val = rows[r_idx][col]
+                        if isinstance(val, (int, float)):
+                            total += float(val)
+                        elif isinstance(val, str):
+                            try:
+                                total += float(val.replace(",", "."))
+                            except ValueError:
+                                pass
+            d2 += timedelta(days=1)
+
+    return total
+
+
 def build_payload(sub_id_value, date_from: date, date_to: date) -> dict:
     filters = []
     if sub_id_value is not None:
@@ -195,7 +289,7 @@ def fetch_stats(sub_id_value, date_from: date, date_to: date) -> dict:
     return data.get("summary") or data.get("totals") or {}
 
 
-def format_stats(title: str, stats: dict, date_from: date, date_to: date) -> str:
+def format_stats(title: str, stats: dict, date_from: date, date_to: date, expense: float) -> str:
     def g(key, default=0):
         return stats.get(key, default)
 
@@ -203,6 +297,13 @@ def format_stats(title: str, stats: dict, date_from: date, date_to: date) -> str
         period = date_from.strftime("%d.%m.%Y")
     else:
         period = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
+
+    try:
+        revenue = float(g("revenue", 0) or 0)
+    except (TypeError, ValueError):
+        revenue = 0.0
+
+    profit = revenue - expense
 
     return (
         f"📌 <b>{title}</b>\n"
@@ -212,22 +313,24 @@ def format_stats(title: str, stats: dict, date_from: date, date_to: date) -> str
         f"🔁 Конверсии: <b>{g('conversions')}</b>\n"
         f"✅ Подтверждено: <b>{g(STATUS_METRICS['confirmed'])}</b>\n"
         f"❌ Отклонено: <b>{g(STATUS_METRICS['declined'])}</b>\n\n"
-        f"💵 Revenue: <b>${g('revenue')}</b>\n"
-        f"💸 Cost: <b>${g('cost')}</b>\n"
-        f"📈 Profit: <b>${g('profit')}</b>"
+        f"💵 Доход (Keitaro): <b>${revenue:.2f}</b>\n"
+        f"💸 Расход (Excel): <b>${expense:.2f}</b>\n"
+        f"📈 Profit: <b>${profit:.2f}</b>"
     )
 
 
 def safe_fetch_and_format(title: str, sub_id_value, date_from: date, date_to: date) -> str:
     try:
         stats = fetch_stats(sub_id_value, date_from, date_to)
-        return format_stats(title, stats, date_from, date_to)
     except requests.exceptions.HTTPError as e:
         logger.exception("Keitaro API HTTP error")
         return f"Ошибка при обращении к Keitaro API (код {e.response.status_code})."
     except Exception:
         logger.exception("Unexpected error while fetching Keitaro stats")
         return "Не удалось получить статистику. Попробуй ещё раз чуть позже."
+
+    expense = fetch_expense(sub_id_value, date_from, date_to)
+    return format_stats(title, stats, date_from, date_to, expense)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

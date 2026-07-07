@@ -91,10 +91,7 @@ def save_profiles(profiles: dict) -> None:
 
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL], [MENU_CALENDAR]]
-    names = list(PEOPLE.values())
-    for i in range(0, len(names), 2):
-        rows.append(names[i:i + 2])
+    rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL]]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 

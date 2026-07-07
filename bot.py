@@ -66,9 +66,11 @@ MENU_MY_STATS = "📊 Моя стата"
 MENU_TEAM = "👥 Команда"
 MENU_TOTAL = "📋 Итого"
 MENU_EXPENSE = "💸 Расход"
+MENU_PROFIT = "📈 Profit"
 MENU_CALENDAR = "📅 Выбрать период"
 CALENDAR_PICK = "📅 Своя дата"
 EXPENSE_ALL = "📋 Итого (расход)"
+PROFIT_ALL = "📋 Итого (profit)"
 BACK = "⬅️ Назад"
 
 PERIOD_TODAY = "Сегодня"
@@ -105,7 +107,7 @@ def save_profiles(profiles: dict) -> None:
 
 
 def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL], [MENU_EXPENSE]]
+    rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL], [MENU_EXPENSE, MENU_PROFIT]]
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
 
@@ -113,6 +115,14 @@ def expense_target_keyboard() -> ReplyKeyboardMarkup:
     names = list(PEOPLE.values())
     rows = [names[i:i + 2] for i in range(0, len(names), 2)]
     rows.append([EXPENSE_ALL])
+    rows.append([BACK])
+    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+
+
+def profit_target_keyboard() -> ReplyKeyboardMarkup:
+    names = list(PEOPLE.values())
+    rows = [names[i:i + 2] for i in range(0, len(names), 2)]
+    rows.append([PROFIT_ALL])
     rows.append([BACK])
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
@@ -372,6 +382,38 @@ def safe_fetch_expense_and_format(title: str, sub_id_value, date_from: date, dat
     return format_expense_only(title, expense, date_from, date_to)
 
 
+def format_profit_only(title: str, revenue: float, expense: float, date_from: date, date_to: date) -> str:
+    if date_from == date_to:
+        period = date_from.strftime("%d.%m.%Y")
+    else:
+        period = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
+
+    profit = revenue - expense
+
+    return (
+        f"📌 <b>{title}</b>\n"
+        f"🗓 Период: {period}\n\n"
+        f"💵 Доход (Keitaro): <b>${revenue:.2f}</b>\n"
+        f"💸 Расход (Excel): <b>${expense:.2f}</b>\n"
+        f"📈 Profit: <b>${profit:.2f}</b>"
+    )
+
+
+def safe_fetch_profit_and_format(title: str, sub_id_value, date_from: date, date_to: date) -> str:
+    try:
+        stats = fetch_stats(sub_id_value, date_from, date_to)
+        revenue = float(stats.get("revenue", 0) or 0)
+    except requests.exceptions.HTTPError as e:
+        logger.exception("Keitaro API HTTP error")
+        return f"Ошибка при обращении к Keitaro API (код {e.response.status_code})."
+    except Exception:
+        logger.exception("Unexpected error while fetching Keitaro stats for profit")
+        return "Не удалось получить данные для profit. Попробуй ещё раз чуть позже."
+
+    expense = fetch_expense(sub_id_value, date_from, date_to)
+    return format_profit_only(title, revenue, expense, date_from, date_to)
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("pending", None)
     await update.message.reply_text(
@@ -387,8 +429,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if pending and text in PERIOD_RANGES:
         date_from, date_to = PERIOD_RANGES[text]()
-        if pending.get("mode") == "expense":
+        mode = pending.get("mode")
+        if mode == "expense":
             message = safe_fetch_expense_and_format(
+                pending["title"], pending["sub_id"], date_from, date_to
+            )
+        elif mode == "profit":
+            message = safe_fetch_profit_and_format(
                 pending["title"], pending["sub_id"], date_from, date_to
             )
         else:
@@ -435,6 +482,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         context.user_data["awaiting_expense_target"] = True
         await update.message.reply_text(
             "Чей расход показать?", reply_markup=expense_target_keyboard()
+        )
+        return
+
+    if context.user_data.get("awaiting_profit_target"):
+        context.user_data.pop("awaiting_profit_target", None)
+        name_to_sub_id_profit = {name: sub_id for sub_id, name in PEOPLE.items()}
+        if text == PROFIT_ALL:
+            context.user_data["pending"] = {
+                "sub_id": None, "title": "Profit (вся команда)", "mode": "profit"
+            }
+            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
+            return
+        elif text in name_to_sub_id_profit:
+            context.user_data["pending"] = {
+                "sub_id": name_to_sub_id_profit[text], "title": f"Profit ({text})", "mode": "profit"
+            }
+            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
+            return
+        else:
+            await update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard())
+            return
+
+    if text == MENU_PROFIT:
+        context.user_data["awaiting_profit_target"] = True
+        await update.message.reply_text(
+            "Чей profit показать?", reply_markup=profit_target_keyboard()
         )
         return
 
@@ -511,6 +584,8 @@ async def handle_calendar_callback(update: Update, context: ContextTypes.DEFAULT
             title, sub_id_value, mode = "Итого (вся команда)", None, "revenue"
         if mode == "expense":
             message = safe_fetch_expense_and_format(title, sub_id_value, picked_date, picked_date)
+        elif mode == "profit":
+            message = safe_fetch_profit_and_format(title, sub_id_value, picked_date, picked_date)
         else:
             message = safe_fetch_and_format(title, sub_id_value, picked_date, picked_date)
         await query.message.reply_html(message, reply_markup=main_menu_keyboard())

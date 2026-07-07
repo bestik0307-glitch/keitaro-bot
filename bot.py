@@ -40,13 +40,15 @@ PEOPLE = {
 
 # ---- Права доступа ----
 ADMIN_USER_IDS = {
-    # "123456789",  # bestik430
+    "760508432",   # bestik430
+    "7315594630",  # ispolinaa
+    "816069847",   # KonAA31
 }
 EMPLOYEE_SUB_ID_MAP = {
-    # "111111111": "47",  # Maksim
-    # "222222222": "49",  # Sasha
-    # "333333333": "48",  # Kostya
-    # "444444444": "46",  # Alex
+    "7880427374": "47",  # Maksim
+    "8362207595": "49",  # Sasha
+    "7367245869": "48",  # Kostya
+    "8145606032": "46",  # Alex
 }
 
 BASE_METRICS = ["clicks", "campaign_unique_clicks", "conversions", "cost", "revenue", "profit"]

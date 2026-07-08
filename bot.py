@@ -1,7 +1,7 @@
 """
 Telegram-бот со статистикой Keitaro: меню с кнопками, статистика по каждому
 человеку (по параметру sub_id_20), общий итог по команде, выбор периода,
-календарь для выбора произвольной даты и разграничение прав доступа.
+календарь для выбора диапазона дат и разграничение прав доступа.
 """
 
 import os
@@ -38,7 +38,6 @@ PEOPLE = {
     "49": "Sasha",
 }
 
-# ---- Права доступа ----
 ADMIN_USER_IDS = {
     "760508432",   # bestik430
     "7315594630",  # ispolinaa
@@ -495,9 +494,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         if pending and text == CALENDAR_PICK:
+            context.user_data.pop("range_start", None)
             today = date.today()
             await update.message.reply_text(
-                f"Выбери дату для «{pending['title']}»:",
+                f"Выбери дату начала периода для «{pending['title']}»:",
                 reply_markup=build_calendar_markup(today.year, today.month),
             )
             return
@@ -542,9 +542,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     if pending and text == CALENDAR_PICK:
+        context.user_data.pop("range_start", None)
         today = date.today()
         await update.message.reply_text(
-            f"Выбери дату для «{pending['title']}»:",
+            f"Выбери дату начала периода для «{pending['title']}»:",
             reply_markup=build_calendar_markup(today.year, today.month),
         )
         return
@@ -617,9 +618,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if text == MENU_CALENDAR:
         context.user_data.pop("pending", None)
+        context.user_data.pop("range_start", None)
         today = date.today()
         await update.message.reply_text(
-            "Выбери дату — покажу статистику всей команды за этот день:",
+            "Выбери дату начала периода — покажу статистику всей команды:",
             reply_markup=build_calendar_markup(today.year, today.month),
         )
         return
@@ -677,6 +679,27 @@ async def handle_calendar_callback(update: Update, context: ContextTypes.DEFAULT
     if data.startswith("cal:pick:"):
         date_str = data.split(":", 2)[2]
         picked_date = date.fromisoformat(date_str)
+
+        range_start = context.user_data.get("range_start")
+
+        if range_start is None:
+            context.user_data["range_start"] = picked_date
+            await query.answer(f"Начало: {picked_date.strftime('%d.%m.%Y')}")
+            try:
+                await query.edit_message_text(
+                    f"Начало периода: {picked_date.strftime('%d.%m.%Y')}\n"
+                    f"Теперь выбери дату окончания (можно ту же — для одного дня):",
+                    reply_markup=build_calendar_markup(picked_date.year, picked_date.month),
+                )
+            except Exception:
+                pass
+            return
+
+        date_from, date_to = range_start, picked_date
+        if date_from > date_to:
+            date_from, date_to = date_to, date_from
+        context.user_data.pop("range_start", None)
+
         await query.answer("Считаю статистику…")
         pending = context.user_data.get("pending")
         if pending:
@@ -684,11 +707,11 @@ async def handle_calendar_callback(update: Update, context: ContextTypes.DEFAULT
         else:
             title, sub_id_value, mode = "Итого (вся команда)", None, "revenue"
         if mode == "expense":
-            message = safe_fetch_expense_and_format(title, sub_id_value, picked_date, picked_date)
+            message = safe_fetch_expense_and_format(title, sub_id_value, date_from, date_to)
         elif mode == "profit":
-            message = safe_fetch_profit_and_format(title, sub_id_value, picked_date, picked_date)
+            message = safe_fetch_profit_and_format(title, sub_id_value, date_from, date_to)
         else:
-            message = safe_fetch_and_format(title, sub_id_value, picked_date, picked_date)
+            message = safe_fetch_and_format(title, sub_id_value, date_from, date_to)
         await query.message.reply_html(message, reply_markup=menu_kb)
         context.user_data.pop("pending", None)
         return

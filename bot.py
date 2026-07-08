@@ -1,14 +1,14 @@
 """
 Telegram-бот со статистикой Keitaro: меню с кнопками, статистика по каждому
 человеку (по параметру sub_id_20), общий итог по команде, выбор периода,
-календарь для выбора диапазона дат и разграничение прав доступа.
+календарь для выбора диапазона дат, разграничение прав доступа и часовой пояс UTC+3.
 """
 
 import os
 import json
 import logging
 import calendar
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 
 import requests
 from google.oauth2 import service_account
@@ -26,6 +26,14 @@ from telegram.ext import (
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8518822069:AAF6rqBc8pg47jf9o5enzMup8wxAOQY68Jw")
 KEITARO_URL = os.getenv("KEITARO_URL", "https://lgmaxverd.sbs").strip().rstrip("/")
 KEITARO_API_KEY = os.getenv("KEITARO_API_KEY", "cd02621ae03b3d9327efc05798cdd75b").strip()
+
+# Часовой пояс аккаунта Keitaro (UTC+3, как настроено в самой панели)
+KEITARO_TIMEZONE = "Europe/Moscow"
+LOCAL_TZ = dt_timezone(timedelta(hours=3))
+
+
+def today_local() -> date:
+    return datetime.now(dt_timezone.utc).astimezone(LOCAL_TZ).date()
 
 SUB_ID_FIELD = "sub_id_20"
 
@@ -91,13 +99,13 @@ PERIOD_7D = "7 дней"
 PERIOD_30D = "30 дней"
 
 PERIOD_RANGES = {
-    PERIOD_TODAY: lambda: (date.today(), date.today()),
+    PERIOD_TODAY: lambda: (today_local(), today_local()),
     PERIOD_YESTERDAY: lambda: (
-        date.today() - timedelta(days=1),
-        date.today() - timedelta(days=1),
+        today_local() - timedelta(days=1),
+        today_local() - timedelta(days=1),
     ),
-    PERIOD_7D: lambda: (date.today() - timedelta(days=6), date.today()),
-    PERIOD_30D: lambda: (date.today() - timedelta(days=29), date.today()),
+    PERIOD_7D: lambda: (today_local() - timedelta(days=6), today_local()),
+    PERIOD_30D: lambda: (today_local() - timedelta(days=29), today_local()),
 }
 
 MONTH_NAMES_RU = [
@@ -182,7 +190,7 @@ def build_calendar_markup(year: int, month: int) -> InlineKeyboardMarkup:
     keyboard.append([InlineKeyboardButton(d, callback_data="cal:ignore") for d in week_days])
 
     month_calendar = calendar.monthcalendar(year, month)
-    today = date.today()
+    today = today_local()
 
     for week in month_calendar:
         row = []
@@ -309,7 +317,7 @@ def build_payload(sub_id_value, date_from: date, date_to: date) -> dict:
 
     return {
         "range": {
-            "timezone": "UTC",
+            "timezone": KEITARO_TIMEZONE,
             "from": date_from.strftime("%Y-%m-%d 00:00:00"),
             "to": date_to.strftime("%Y-%m-%d 23:59:59"),
         },
@@ -495,7 +503,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if pending and text == CALENDAR_PICK:
             context.user_data.pop("range_start", None)
-            today = date.today()
+            today = today_local()
             await update.message.reply_text(
                 f"Выбери дату начала периода для «{pending['title']}»:",
                 reply_markup=build_calendar_markup(today.year, today.month),
@@ -543,7 +551,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     if pending and text == CALENDAR_PICK:
         context.user_data.pop("range_start", None)
-        today = date.today()
+        today = today_local()
         await update.message.reply_text(
             f"Выбери дату начала периода для «{pending['title']}»:",
             reply_markup=build_calendar_markup(today.year, today.month),
@@ -619,7 +627,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if text == MENU_CALENDAR:
         context.user_data.pop("pending", None)
         context.user_data.pop("range_start", None)
-        today = date.today()
+        today = today_local()
         await update.message.reply_text(
             "Выбери дату начала периода — покажу статистику всей команды:",
             reply_markup=build_calendar_markup(today.year, today.month),

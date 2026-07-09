@@ -20,7 +20,7 @@ KEITARO_URL = os.environ["KEITARO_URL"].rstrip("/")
 KEITARO_API_KEY = os.environ["KEITARO_API_KEY"]
 CHAT_ID = os.environ.get("CHAT_ID")
 POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "90"))
-CLICK_LOOKBACK_HOURS = int(os.environ.get("CLICK_LOOKBACK_HOURS", "720"))
+CLICK_LOOKBACK_HOURS = int(os.environ.get("CLICK_LOOKBACK_HOURS", "168"))
 LOOKBACK_MINUTES = int(os.environ.get("LOOKBACK_MINUTES", "20"))
 SEEN_IDS_FILE = Path(os.environ.get("SEEN_IDS_FILE", "/opt/keitaro_deposit_bot/seen_ids.json"))
 SEEN_IDS_MAX_AGE_HOURS = 48
@@ -111,6 +111,10 @@ def fetch_recent_deposits() -> list:
             break
 
     sale_cutoff_str = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now - LOOKBACK_MINUTES * 60))
+    logger.info(
+        "fetch_recent_deposits: всего строк от API=%d, окно клика=[%s..%s], cutoff по продаже=%s",
+        len(rows), click_from_dt, click_to_dt, sale_cutoff_str,
+    )
     recent = [r for r in rows if (r.get("sale_datetime") or "") >= sale_cutoff_str]
     return recent
 
@@ -154,6 +158,10 @@ async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
 
     seen = load_seen_ids()
     new_rows = [r for r in rows if r.get("conversion_id") not in seen]
+    logger.info(
+        "Опрос: получено строк=%d, новых=%d, всего в seen=%d",
+        len(rows), len(new_rows), len(seen),
+    )
 
     for row in sorted(new_rows, key=lambda r: r.get("sale_datetime") or ""):
         cid = row.get("conversion_id")

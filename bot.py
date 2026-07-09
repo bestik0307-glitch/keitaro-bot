@@ -1,43 +1,31 @@
-"""
-Telegram-бот со статистикой Keitaro: меню с кнопками, статистика по каждому
-человеку (по параметру sub_id_20), общий итог по команде, выбор периода,
-календарь для выбора диапазона дат, разграничение прав доступа и часовой пояс UTC+3.
-"""
-
-import os
+cat > /opt/keitaro_deposit_bot/bot.py << 'PYEOF'
 import json
 import logging
-import calendar
-from datetime import date, datetime, timedelta, timezone as dt_timezone
+import os
+import time
+from pathlib import Path
 
 import requests
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, Update
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
+
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    level=logging.INFO,
 )
+logger = logging.getLogger("deposit-bot")
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8518822069:AAF6rqBc8pg47jf9o5enzMup8wxAOQY68Jw")
-KEITARO_URL = os.getenv("KEITARO_URL", "https://lgmaxverd.sbs").strip().rstrip("/")
-KEITARO_API_KEY = os.getenv("KEITARO_API_KEY", "cd02621ae03b3d9327efc05798cdd75b").strip()
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+KEITARO_URL = os.environ["KEITARO_URL"].rstrip("/")
+KEITARO_API_KEY = os.environ["KEITARO_API_KEY"]
+CHAT_ID = os.environ.get("CHAT_ID")
+POLL_INTERVAL = int(os.environ.get("POLL_INTERVAL_SECONDS", "90"))
+CLICK_LOOKBACK_HOURS = int(os.environ.get("CLICK_LOOKBACK_HOURS", "720"))
+LOOKBACK_MINUTES = int(os.environ.get("LOOKBACK_MINUTES", "20"))
+SEEN_IDS_FILE = Path(os.environ.get("SEEN_IDS_FILE", "/opt/keitaro_deposit_bot/seen_ids.json"))
+SEEN_IDS_MAX_AGE_HOURS = 48
 
-# Часовой пояс аккаунта Keitaro (UTC+3, как настроено в самой панели)
-KEITARO_TIMEZONE = "Europe/Moscow"
-LOCAL_TZ = dt_timezone(timedelta(hours=3))
-
-
-def today_local() -> date:
-    return datetime.now(dt_timezone.utc).astimezone(LOCAL_TZ).date()
-
-SUB_ID_FIELD = "sub_id_20"
-
-PEOPLE = {
+BUYERS = {
     "44": "Bogdan",
     "45": "Aleksey",
     "46": "Alex",
@@ -46,695 +34,183 @@ PEOPLE = {
     "49": "Sasha",
 }
 
-ADMIN_USER_IDS = {
-    "760508432",   # bestik430
-    "7315594630",  # ispolinaa
-    "816069847",   # KonAA31
-}
-EMPLOYEE_SUB_ID_MAP = {
-    "7880427374": "47",  # Maksim
-    "8362207595": "49",  # Sasha
-    "7367245869": "48",  # Kostya
-    "8145606032": "46",  # Alex
-}
-
-BASE_METRICS = ["clicks", "campaign_unique_clicks", "conversions", "cost", "revenue", "profit"]
-STATUS_METRICS = {
-    "confirmed": "sales",
-    "declined": "rejected",
-}
-UNIQUE_CLICKS_KEY = "campaign_unique_clicks"
-
-PROFILE_STORE_PATH = os.path.join(os.path.dirname(__file__), "user_profiles.json")
-
-GOOGLE_SHEETS_CREDENTIALS_PATH = os.getenv(
-    "GOOGLE_SHEETS_CREDENTIALS_PATH", "/opt/keitaro_bot/gsheet_credentials.json"
-)
-EXPENSE_SPREADSHEET_ID = os.getenv(
-    "EXPENSE_SPREADSHEET_ID", "1_HtfLM1i_oh-utbFRwAHUFNL_mPho6-Hpcjt-sZ5J8Y"
-)
-EXPENSE_ROW_ORDER = list(PEOPLE.keys())
-
-_sheets_service = None
-
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-MENU_MY_STATS = "📊 Моя стата"
-MENU_TEAM = "👥 Команда"
-MENU_TOTAL = "📋 Итого"
-MENU_EXPENSE = "💸 Расход"
-MENU_PROFIT = "📈 Profit"
-MENU_CALENDAR = "📅 Выбрать период"
-CALENDAR_PICK = "📅 Своя дата"
-EXPENSE_ALL = "📋 Итого (расход)"
-PROFIT_ALL = "📋 Итого (profit)"
-BACK = "⬅️ Назад"
-
-PERIOD_TODAY = "Сегодня"
-PERIOD_YESTERDAY = "Вчера"
-PERIOD_7D = "7 дней"
-PERIOD_30D = "30 дней"
-
-PERIOD_RANGES = {
-    PERIOD_TODAY: lambda: (today_local(), today_local()),
-    PERIOD_YESTERDAY: lambda: (
-        today_local() - timedelta(days=1),
-        today_local() - timedelta(days=1),
-    ),
-    PERIOD_7D: lambda: (today_local() - timedelta(days=6), today_local()),
-    PERIOD_30D: lambda: (today_local() - timedelta(days=29), today_local()),
-}
-
-MONTH_NAMES_RU = [
-    "", "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
-    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+COLUMNS = [
+    "sub_id_3",
+    "sub_id_4",
+    "sub_id",
+    "sub_id_20",
+    "country_code",
+    "status",
+    "offer",
+    "sale_datetime",
+    "revenue",
+    "conversion_id",
 ]
 
 
-def load_profiles() -> dict:
-    if os.path.exists(PROFILE_STORE_PATH):
-        with open(PROFILE_STORE_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
+def load_seen_ids() -> dict:
+    if SEEN_IDS_FILE.exists():
+        try:
+            return json.loads(SEEN_IDS_FILE.read_text())
+        except Exception:
+            logger.exception("Не удалось прочитать файл seen_ids, начинаю с чистого листа")
     return {}
 
 
-def save_profiles(profiles: dict) -> None:
-    with open(PROFILE_STORE_PATH, "w", encoding="utf-8") as f:
-        json.dump(profiles, f, ensure_ascii=False, indent=2)
+def save_seen_ids(seen: dict) -> None:
+    SEEN_IDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SEEN_IDS_FILE.write_text(json.dumps(seen))
 
 
-def get_role(user_id: str):
-    if user_id in ADMIN_USER_IDS:
-        return "admin"
-    if user_id in EMPLOYEE_SUB_ID_MAP:
-        return "employee"
-    return None
+def prune_seen_ids(seen: dict) -> dict:
+    cutoff = time.time() - SEEN_IDS_MAX_AGE_HOURS * 3600
+    return {cid: ts for cid, ts in seen.items() if ts > cutoff}
 
 
-def main_menu_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[MENU_MY_STATS, MENU_TEAM], [MENU_TOTAL], [MENU_EXPENSE, MENU_PROFIT]]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+def fetch_recent_deposits() -> list:
+    now = time.time()
 
+    click_from_dt = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now - CLICK_LOOKBACK_HOURS * 3600))
+    click_to_dt = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now + 60))
 
-def employee_menu_keyboard() -> ReplyKeyboardMarkup:
-    rows = [[MENU_MY_STATS]]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
+    page_size = 1000
+    offset = 0
+    rows = []
 
-
-def expense_target_keyboard() -> ReplyKeyboardMarkup:
-    names = list(PEOPLE.values())
-    rows = [names[i:i + 2] for i in range(0, len(names), 2)]
-    rows.append([EXPENSE_ALL])
-    rows.append([BACK])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-
-def profit_target_keyboard() -> ReplyKeyboardMarkup:
-    names = list(PEOPLE.values())
-    rows = [names[i:i + 2] for i in range(0, len(names), 2)]
-    rows.append([PROFIT_ALL])
-    rows.append([BACK])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-
-def people_list_keyboard() -> ReplyKeyboardMarkup:
-    names = list(PEOPLE.values())
-    rows = [names[i:i + 2] for i in range(0, len(names), 2)]
-    rows.append([BACK])
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-
-def period_keyboard() -> ReplyKeyboardMarkup:
-    rows = [
-        [PERIOD_TODAY, PERIOD_YESTERDAY],
-        [PERIOD_7D, PERIOD_30D],
-        [CALENDAR_PICK],
-        [BACK],
-    ]
-    return ReplyKeyboardMarkup(rows, resize_keyboard=True)
-
-
-def build_calendar_markup(year: int, month: int) -> InlineKeyboardMarkup:
-    keyboard = []
-
-    keyboard.append([
-        InlineKeyboardButton(
-            f"{MONTH_NAMES_RU[month]} {year}", callback_data="cal:ignore"
+    while True:
+        payload = {
+            "range": {"from": click_from_dt, "to": click_to_dt, "timezone": "UTC"},
+            "columns": COLUMNS,
+            "filters": [
+                {"name": "status", "operator": "EQUALS", "expression": "sale"},
+            ],
+            "sort": [{"name": "sale_datetime", "order": "desc"}],
+            "limit": page_size,
+            "offset": offset,
+        }
+        resp = requests.post(
+            f"{KEITARO_URL}/admin_api/v1/conversions/log",
+            headers={
+                "Api-Key": KEITARO_API_KEY,
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
         )
-    ])
+        resp.raise_for_status()
+        data = resp.json()
+        page_rows = data.get("rows", [])
+        rows.extend(page_rows)
 
-    week_days = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    keyboard.append([InlineKeyboardButton(d, callback_data="cal:ignore") for d in week_days])
+        if len(page_rows) < page_size:
+            break
+        offset += page_size
 
-    month_calendar = calendar.monthcalendar(year, month)
-    today = today_local()
+        if offset > 50000:
+            logger.warning("Достигнут предохранитель пагинации (50000 строк), останавливаю сбор")
+            break
 
-    for week in month_calendar:
-        row = []
-        for day in week:
-            if day == 0:
-                row.append(InlineKeyboardButton(" ", callback_data="cal:ignore"))
-            else:
-                label = f"[{day}]" if date(year, month, day) == today else str(day)
-                row.append(InlineKeyboardButton(
-                    label, callback_data=f"cal:pick:{year}-{month:02d}-{day:02d}"
-                ))
-        keyboard.append(row)
-
-    prev_month = month - 1 or 12
-    prev_year = year - 1 if month == 1 else year
-    next_month = month + 1 if month < 12 else 1
-    next_year = year + 1 if month == 12 else year
-
-    keyboard.append([
-        InlineKeyboardButton("« Пред.", callback_data=f"cal:nav:{prev_year}-{prev_month:02d}"),
-        InlineKeyboardButton("След. »", callback_data=f"cal:nav:{next_year}-{next_month:02d}"),
-    ])
-
-    return InlineKeyboardMarkup(keyboard)
+    sale_cutoff_str = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(now - LOOKBACK_MINUTES * 60))
+    recent = [r for r in rows if (r.get("sale_datetime") or "") >= sale_cutoff_str]
+    return recent
 
 
-def get_sheets_service():
-    global _sheets_service
-    if _sheets_service is None:
-        creds = service_account.Credentials.from_service_account_file(
-            GOOGLE_SHEETS_CREDENTIALS_PATH,
-            scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
-        )
-        _sheets_service = build("sheets", "v4", credentials=creds, cache_discovery=False)
-    return _sheets_service
+def format_message(row: dict) -> str:
+    buyer_code = str(row.get("sub_id_20", "")).strip()
+    buyer_name = BUYERS.get(buyer_code, f"ID{buyer_code}" if buyer_code else "Unknown")
+    geo = (row.get("country_code") or "").lower()
+    creo = row.get("sub_id_3") or "-"
+    adset = row.get("sub_id_4") or "-"
+    offer = row.get("offer") or "-"
+    click_id = row.get("sub_id") or "-"
+    revenue = row.get("revenue", 0)
+    sale_time = row.get("sale_datetime") or "-"
+
+    return (
+        "💰 <b>DEPOSIT</b>\n"
+        f"#{buyer_name}\n"
+        "Status: dep\n"
+        f"GEO: {geo}\n"
+        f"Creo: {creo}\n"
+        f"Adset: {adset}\n"
+        f"Offer: {offer}\n"
+        f"ClickID: {click_id}\n"
+        f"Sum: {revenue}\n"
+        f"Time: {sale_time}"
+    )
 
 
-def fetch_expense(sub_id_value, date_from: date, date_to: date) -> float:
-    total = 0.0
+async def poll_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = context.job.data["chat_id"]
+    if not chat_id:
+        logger.warning("CHAT_ID не задан — уведомления некуда слать.")
+        return
+
     try:
-        service = get_sheets_service()
+        rows = fetch_recent_deposits()
     except Exception:
-        logger.exception("Не удалось инициализировать Google Sheets API")
-        return 0.0
+        logger.exception("Не удалось получить данные из Keitaro API")
+        return
 
-    months = set()
-    d = date_from
-    while d <= date_to:
-        months.add((d.year, d.month))
-        d += timedelta(days=1)
+    seen = load_seen_ids()
+    new_rows = [r for r in rows if r.get("conversion_id") not in seen]
 
-    for year, month in months:
-        tab_name = f"{MONTH_NAMES_RU[month]} {year}"
+    for row in sorted(new_rows, key=lambda r: r.get("sale_datetime") or ""):
+        cid = row.get("conversion_id")
         try:
-            result = service.spreadsheets().values().get(
-                spreadsheetId=EXPENSE_SPREADSHEET_ID,
-                range=f"'{tab_name}'!A1:AZ8",
-                valueRenderOption="UNFORMATTED_VALUE",
-            ).execute()
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=format_message(row),
+                parse_mode="HTML",
+            )
         except Exception:
-            logger.exception("Не удалось прочитать вкладку %s в таблице расходов", tab_name)
+            logger.exception("Не удалось отправить сообщение для conversion_id=%s", cid)
             continue
+        seen[cid] = time.time()
 
-        rows = result.get("values", [])
-        if not rows:
-            logger.warning("Вкладка %s: данные не получены (rows пустой)", tab_name)
-            continue
-
-        header = rows[0]
-        logger.info("Вкладка %s: получено строк=%d, заголовок(первые 10)=%s", tab_name, len(rows), header[:10])
-        date_col = {}
-        sheets_epoch = date(1899, 12, 30)
-        for idx, cell in enumerate(header):
-            if isinstance(cell, str) and cell.count(".") == 2:
-                try:
-                    dd, mm, yyyy = cell.split(".")
-                    date_col[date(int(yyyy), int(mm), int(dd))] = idx
-                except ValueError:
-                    continue
-            elif isinstance(cell, (int, float)):
-                try:
-                    date_col[sheets_epoch + timedelta(days=int(cell))] = idx
-                except (ValueError, OverflowError):
-                    continue
-
-        if sub_id_value is None:
-            target_rows = list(range(1, 1 + len(EXPENSE_ROW_ORDER)))
-        else:
-            try:
-                pos = EXPENSE_ROW_ORDER.index(sub_id_value)
-                target_rows = [1 + pos]
-            except ValueError:
-                target_rows = []
-
-        d2 = max(date_from, date(year, month, 1))
-        last_day = calendar.monthrange(year, month)[1]
-        month_end = min(date_to, date(year, month, last_day))
-        while d2 <= month_end:
-            col = date_col.get(d2)
-            if col is not None:
-                for r_idx in target_rows:
-                    if r_idx < len(rows) and col < len(rows[r_idx]):
-                        val = rows[r_idx][col]
-                        if isinstance(val, (int, float)):
-                            total += float(val)
-                        elif isinstance(val, str):
-                            try:
-                                total += float(val.replace(",", "."))
-                            except ValueError:
-                                pass
-            d2 += timedelta(days=1)
-
-    return total
+    if new_rows:
+        seen = prune_seen_ids(seen)
+        save_seen_ids(seen)
+        logger.info("Отправлено новых депозитов: %d", len(new_rows))
 
 
-def build_payload(sub_id_value, date_from: date, date_to: date) -> dict:
-    filters = []
-    if sub_id_value is not None:
-        filters.append({
-            "name": SUB_ID_FIELD,
-            "operator": "EQUALS",
-            "expression": sub_id_value,
-        })
-
-    return {
-        "range": {
-            "timezone": KEITARO_TIMEZONE,
-            "from": date_from.strftime("%Y-%m-%d 00:00:00"),
-            "to": date_to.strftime("%Y-%m-%d 23:59:59"),
-        },
-        "columns": [],
-        "metrics": BASE_METRICS + list(STATUS_METRICS.values()),
-        "grouping": [],
-        "filters": filters,
-        "limit": 1,
-        "offset": 0,
-    }
-
-
-def fetch_stats(sub_id_value, date_from: date, date_to: date) -> dict:
-    url = f"{KEITARO_URL}/admin_api/v1/report/build"
-    headers = {
-        "Api-Key": KEITARO_API_KEY,
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-    }
-    payload = build_payload(sub_id_value, date_from, date_to)
-    response = requests.post(url, json=payload, headers=headers, timeout=20)
-    if not response.ok:
-        logger.error("Keitaro API error %s: %s", response.status_code, response.text)
-    response.raise_for_status()
-    data = response.json()
-    rows = data.get("rows") or data.get("data") or []
-    if rows:
-        return rows[0]
-    return data.get("summary") or data.get("totals") or {}
-
-
-def format_stats(title: str, stats: dict, date_from: date, date_to: date, expense: float) -> str:
-    def g(key, default=0):
-        return stats.get(key, default)
-
-    if date_from == date_to:
-        period = date_from.strftime("%d.%m.%Y")
-    else:
-        period = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-
-    try:
-        revenue = float(g("revenue", 0) or 0)
-    except (TypeError, ValueError):
-        revenue = 0.0
-
-    profit = revenue - expense
-
-    return (
-        f"📌 <b>{title}</b>\n"
-        f"🗓 Период: {period}\n\n"
-        f"👆 Клики: <b>{g('clicks')}</b>\n"
-        f"🎯 Уникальные клики: <b>{g(UNIQUE_CLICKS_KEY)}</b>\n"
-        f"🔁 Конверсии: <b>{g('conversions')}</b>\n"
-        f"✅ Подтверждено: <b>{g(STATUS_METRICS['confirmed'])}</b>\n"
-        f"❌ Отклонено: <b>{g(STATUS_METRICS['declined'])}</b>\n\n"
-        f"💵 Доход (Keitaro): <b>${revenue:.2f}</b>\n"
-        f"💸 Расход (Excel): <b>${expense:.2f}</b>\n"
-        f"📈 Profit: <b>${profit:.2f}</b>"
-    )
-
-
-def safe_fetch_and_format(title: str, sub_id_value, date_from: date, date_to: date) -> str:
-    try:
-        stats = fetch_stats(sub_id_value, date_from, date_to)
-    except requests.exceptions.HTTPError as e:
-        logger.exception("Keitaro API HTTP error")
-        return f"Ошибка при обращении к Keitaro API (код {e.response.status_code})."
-    except Exception:
-        logger.exception("Unexpected error while fetching Keitaro stats")
-        return "Не удалось получить статистику. Попробуй ещё раз чуть позже."
-
-    expense = fetch_expense(sub_id_value, date_from, date_to)
-    return format_stats(title, stats, date_from, date_to, expense)
-
-
-def format_expense_only(title: str, expense: float, date_from: date, date_to: date) -> str:
-    if date_from == date_to:
-        period = date_from.strftime("%d.%m.%Y")
-    else:
-        period = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-
-    return (
-        f"📌 <b>{title}</b>\n"
-        f"🗓 Период: {period}\n\n"
-        f"💸 Расход: <b>${expense:.2f}</b>"
-    )
-
-
-def safe_fetch_expense_and_format(title: str, sub_id_value, date_from: date, date_to: date) -> str:
-    try:
-        expense = fetch_expense(sub_id_value, date_from, date_to)
-    except Exception:
-        logger.exception("Unexpected error while fetching expense from Google Sheets")
-        return "Не удалось получить расход. Попробуй ещё раз чуть позже."
-    return format_expense_only(title, expense, date_from, date_to)
-
-
-def format_profit_only(title: str, revenue: float, expense: float, date_from: date, date_to: date) -> str:
-    if date_from == date_to:
-        period = date_from.strftime("%d.%m.%Y")
-    else:
-        period = f"{date_from.strftime('%d.%m.%Y')} - {date_to.strftime('%d.%m.%Y')}"
-
-    profit = revenue - expense
-
-    return (
-        f"📌 <b>{title}</b>\n"
-        f"🗓 Период: {period}\n\n"
-        f"💵 Доход (Keitaro): <b>${revenue:.2f}</b>\n"
-        f"💸 Расход (Excel): <b>${expense:.2f}</b>\n"
-        f"📈 Profit: <b>${profit:.2f}</b>"
-    )
-
-
-def safe_fetch_profit_and_format(title: str, sub_id_value, date_from: date, date_to: date) -> str:
-    try:
-        stats = fetch_stats(sub_id_value, date_from, date_to)
-        revenue = float(stats.get("revenue", 0) or 0)
-    except requests.exceptions.HTTPError as e:
-        logger.exception("Keitaro API HTTP error")
-        return f"Ошибка при обращении к Keitaro API (код {e.response.status_code})."
-    except Exception:
-        logger.exception("Unexpected error while fetching Keitaro stats for profit")
-        return "Не удалось получить данные для profit. Попробуй ещё раз чуть позже."
-
-    expense = fetch_expense(sub_id_value, date_from, date_to)
-    return format_profit_only(title, revenue, expense, date_from, date_to)
-
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data.pop("pending", None)
-    user_id = str(update.effective_user.id)
-    role = get_role(user_id)
-
-    if role is None:
-        await update.message.reply_text(
-            f"У тебя пока нет доступа к этому боту.\n\n"
-            f"Твой Telegram ID: <code>{user_id}</code>\n"
-            f"Перешли этот ID администратору, чтобы он выдал тебе доступ.",
-            parse_mode="HTML",
-        )
-        return
-
-    if role == "employee":
-        await update.message.reply_text(
-            "Привет! Выбери, что показать:",
-            reply_markup=employee_menu_keyboard(),
-        )
-        return
-
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat = update.effective_chat
     await update.message.reply_text(
-        "Привет! Выбери, что показать:",
-        reply_markup=main_menu_keyboard(),
+        f"Chat ID: <code>{chat.id}</code>\n\n"
+        "Добавьте это значение в переменную окружения CHAT_ID на сервере "
+        "и перезапустите бота.",
+        parse_mode="HTML",
     )
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    text = update.message.text
-    user_id = str(update.effective_user.id)
-    role = get_role(user_id)
-
-    if role is None:
-        await update.message.reply_text(
-            f"У тебя пока нет доступа к этому боту.\n\n"
-            f"Твой Telegram ID: <code>{user_id}</code>\n"
-            f"Перешли этот ID администратору, чтобы он выдал тебе доступ.",
-            parse_mode="HTML",
-        )
-        return
-
-    menu_kb = main_menu_keyboard() if role == "admin" else employee_menu_keyboard()
-
-    if role == "employee":
-        pending = context.user_data.get("pending")
-        if pending and text in PERIOD_RANGES:
-            date_from, date_to = PERIOD_RANGES[text]()
-            message = safe_fetch_and_format(
-                pending["title"], pending["sub_id"], date_from, date_to
-            )
-            await update.message.reply_html(message, reply_markup=menu_kb)
-            context.user_data.pop("pending", None)
-            return
-
-        if pending and text == CALENDAR_PICK:
-            context.user_data.pop("range_start", None)
-            today = today_local()
-            await update.message.reply_text(
-                f"Выбери дату начала периода для «{pending['title']}»:",
-                reply_markup=build_calendar_markup(today.year, today.month),
-            )
-            return
-
-        if text == BACK:
-            context.user_data.pop("pending", None)
-            await update.message.reply_text("Главное меню:", reply_markup=menu_kb)
-            return
-
-        if text == MENU_MY_STATS:
-            sub_id_value = EMPLOYEE_SUB_ID_MAP[user_id]
-            context.user_data["pending"] = {
-                "sub_id": sub_id_value,
-                "title": f"Моя стата ({PEOPLE.get(sub_id_value, sub_id_value)})",
-                "mode": "revenue",
-            }
-            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
-            return
-
-        await update.message.reply_text("Выбери пункт меню:", reply_markup=menu_kb)
-        return
-
-    pending = context.user_data.get("pending")
-
-    if pending and text in PERIOD_RANGES:
-        date_from, date_to = PERIOD_RANGES[text]()
-        mode = pending.get("mode")
-        if mode == "expense":
-            message = safe_fetch_expense_and_format(
-                pending["title"], pending["sub_id"], date_from, date_to
-            )
-        elif mode == "profit":
-            message = safe_fetch_profit_and_format(
-                pending["title"], pending["sub_id"], date_from, date_to
-            )
-        else:
-            message = safe_fetch_and_format(
-                pending["title"], pending["sub_id"], date_from, date_to
-            )
-        await update.message.reply_html(message, reply_markup=main_menu_keyboard())
-        context.user_data.pop("pending", None)
-        return
-
-    if pending and text == CALENDAR_PICK:
-        context.user_data.pop("range_start", None)
-        today = today_local()
-        await update.message.reply_text(
-            f"Выбери дату начала периода для «{pending['title']}»:",
-            reply_markup=build_calendar_markup(today.year, today.month),
-        )
-        return
-
-    if text == BACK:
-        context.user_data.pop("pending", None)
-        await update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard())
-        return
-
-    if context.user_data.get("awaiting_expense_target"):
-        context.user_data.pop("awaiting_expense_target", None)
-        name_to_sub_id_exp = {name: sub_id for sub_id, name in PEOPLE.items()}
-        if text == EXPENSE_ALL:
-            context.user_data["pending"] = {
-                "sub_id": None, "title": "Расход (вся команда)", "mode": "expense"
-            }
-            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
-            return
-        elif text in name_to_sub_id_exp:
-            context.user_data["pending"] = {
-                "sub_id": name_to_sub_id_exp[text], "title": f"Расход ({text})", "mode": "expense"
-            }
-            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
-            return
-        else:
-            await update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard())
-            return
-
-    if text == MENU_EXPENSE:
-        context.user_data["awaiting_expense_target"] = True
-        await update.message.reply_text(
-            "Чей расход показать?", reply_markup=expense_target_keyboard()
-        )
-        return
-
-    if context.user_data.get("awaiting_profit_target"):
-        context.user_data.pop("awaiting_profit_target", None)
-        name_to_sub_id_profit = {name: sub_id for sub_id, name in PEOPLE.items()}
-        if text == PROFIT_ALL:
-            context.user_data["pending"] = {
-                "sub_id": None, "title": "Profit (вся команда)", "mode": "profit"
-            }
-            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
-            return
-        elif text in name_to_sub_id_profit:
-            context.user_data["pending"] = {
-                "sub_id": name_to_sub_id_profit[text], "title": f"Profit ({text})", "mode": "profit"
-            }
-            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
-            return
-        else:
-            await update.message.reply_text("Главное меню:", reply_markup=main_menu_keyboard())
-            return
-
-    if text == MENU_PROFIT:
-        context.user_data["awaiting_profit_target"] = True
-        await update.message.reply_text(
-            "Чей profit показать?", reply_markup=profit_target_keyboard()
-        )
-        return
-
-    if text == MENU_TEAM:
-        await update.message.reply_text("Выбери человека:", reply_markup=people_list_keyboard())
-        return
-
-    if text == MENU_TOTAL:
-        context.user_data["pending"] = {"sub_id": None, "title": "Итого (вся команда)"}
-        await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
-        return
-
-    if text == MENU_CALENDAR:
-        context.user_data.pop("pending", None)
-        context.user_data.pop("range_start", None)
-        today = today_local()
-        await update.message.reply_text(
-            "Выбери дату начала периода — покажу статистику всей команды:",
-            reply_markup=build_calendar_markup(today.year, today.month),
-        )
-        return
-
-    if text == MENU_MY_STATS:
-        profiles = load_profiles()
-        sub_id_value = profiles.get(user_id)
-        if sub_id_value and sub_id_value in PEOPLE:
-            context.user_data["pending"] = {
-                "sub_id": sub_id_value,
-                "title": f"Моя стата ({PEOPLE[sub_id_value]})",
-            }
-            await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
-        else:
-            await update.message.reply_text(
-                "Сначала выбери, кто ты — нажми на своё имя в списке.",
-                reply_markup=people_list_keyboard(),
-            )
-        return
-
-    name_to_sub_id = {name: sub_id for sub_id, name in PEOPLE.items()}
-    if text in name_to_sub_id:
-        sub_id_value = name_to_sub_id[text]
-        profiles = load_profiles()
-        profiles[user_id] = sub_id_value
-        save_profiles(profiles)
-        context.user_data["pending"] = {"sub_id": sub_id_value, "title": text}
-        await update.message.reply_text("Выбери период:", reply_markup=period_keyboard())
-        return
-
-    await update.message.reply_text("Не понял команду. Выбери пункт меню:", reply_markup=main_menu_keyboard())
-
-
-async def handle_calendar_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    data = query.data
-    user_id = str(query.from_user.id)
-    role = get_role(user_id)
-    if role is None:
-        await query.answer()
-        return
-    menu_kb = main_menu_keyboard() if role == "admin" else employee_menu_keyboard()
-
-    if data == "cal:ignore":
-        await query.answer()
-        return
-
-    if data.startswith("cal:nav:"):
-        year_month = data.split(":")[2]
-        year, month = map(int, year_month.split("-"))
-        await query.answer()
-        await query.edit_message_reply_markup(reply_markup=build_calendar_markup(year, month))
-        return
-
-    if data.startswith("cal:pick:"):
-        date_str = data.split(":", 2)[2]
-        picked_date = date.fromisoformat(date_str)
-
-        range_start = context.user_data.get("range_start")
-
-        if range_start is None:
-            context.user_data["range_start"] = picked_date
-            await query.answer(f"Начало: {picked_date.strftime('%d.%m.%Y')}")
-            try:
-                await query.edit_message_text(
-                    f"Начало периода: {picked_date.strftime('%d.%m.%Y')}\n"
-                    f"Теперь выбери дату окончания (можно ту же — для одного дня):",
-                    reply_markup=build_calendar_markup(picked_date.year, picked_date.month),
-                )
-            except Exception:
-                pass
-            return
-
-        date_from, date_to = range_start, picked_date
-        if date_from > date_to:
-            date_from, date_to = date_to, date_from
-        context.user_data.pop("range_start", None)
-
-        await query.answer("Считаю статистику…")
-        pending = context.user_data.get("pending")
-        if pending:
-            title, sub_id_value, mode = pending["title"], pending["sub_id"], pending.get("mode")
-        else:
-            title, sub_id_value, mode = "Итого (вся команда)", None, "revenue"
-        if mode == "expense":
-            message = safe_fetch_expense_and_format(title, sub_id_value, date_from, date_to)
-        elif mode == "profit":
-            message = safe_fetch_profit_and_format(title, sub_id_value, date_from, date_to)
-        else:
-            message = safe_fetch_and_format(title, sub_id_value, date_from, date_to)
-        await query.message.reply_html(message, reply_markup=menu_kb)
-        context.user_data.pop("pending", None)
-        return
-
-    await query.answer()
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    seen = load_seen_ids()
+    await update.message.reply_text(
+        "Бот работает.\n"
+        f"Запомненных депозитов: {len(seen)}\n"
+        f"Опрос каждые {POLL_INTERVAL} сек.\n"
+        f"Окно поиска депозитов (по sale_datetime): {LOOKBACK_MINUTES} мин.\n"
+        f"Окно поиска кликов (по click_datetime): {CLICK_LOOKBACK_HOURS} ч."
+    )
 
 
 def main() -> None:
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(handle_calendar_callback, pattern=r"^cal:"))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("Bot started. Polling for updates...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application = Application.builder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler("start", start_cmd))
+    application.add_handler(CommandHandler("status", status_cmd))
+
+    application.job_queue.run_repeating(
+        poll_job,
+        interval=POLL_INTERVAL,
+        first=5,
+        data={"chat_id": CHAT_ID},
+    )
+
+    logger.info("Бот запущен, опрос каждые %s сек", POLL_INTERVAL)
+    application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+PYEOF
